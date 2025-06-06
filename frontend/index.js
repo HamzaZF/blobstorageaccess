@@ -1,51 +1,37 @@
-const express = require('express');
-const cors = require('cors');
-const {
-    DefaultAzureCredential
-} = require('@azure/identity');
-const {
-    ContainerClient,
-    BlobServiceClient,
-    ContainerSASPermissions,
-    generateBlobSASQueryParameters,
-    SASProtocol
-} = require('@azure/storage-blob');
+// frontend.js
+// Node.js script to request a PDF download link (SAS TOKEN) from the backend
 
-// used for local environment variables
-require('dotenv').config();
+async function getPdfSasLink(filename) {
+  if (!filename) {
+    console.error('Usage: node frontend.js <filename>');
+    process.exit(1);
+  }
 
-const sasToken = ""
+  // Replace with the actual backend URL
+  const BACKEND_URL = 'https://sec-access-hmd7g8c2crhggnbs.canadacentral-01.azurewebsites.net';
 
-// Client or another process uses SAS token to use container
-async function listBlobs(sasToken){
+  const endpoint = `${BACKEND_URL}/api/blob-sas?filename=${encodeURIComponent(filename)}`;
 
-    // get sasToken from backend (secure-access-blob-backend-h9ffekhedeczfjcr.centralus-01.azurewebsites.net/api/containersas)
-    sasToken = await fetch('https://secure-access-blob-backend-h9ffekhedeczfjcr.centralus-01.azurewebsites.net/api/containersas')
-    .then(res => res.json())
-    .then(body => body.sasToken);
+  try {
+    const res = await fetch(endpoint);
+    if (!res.ok) {
+      throw new Error(`Backend returned ${res.status} ${res.statusText}`);
+    }
 
-    console.log(`SAS Token: ${sasToken}`);
+    const { sasUrl } = await res.json();
+    if (!sasUrl) {
+      throw new Error('No sasUrl field in backend response');
+    }
 
-    // Get environment variables
-    const accountName = process.env.AZURE_STORAGE_ACCOUNT_NAME;
-    const containerName = process.env.AZURE_STORAGE_BLOB_CONTAINER_NAME;
-    
-    // Create Url
-    // SAS token is the query string with typical `?` delimiter
-    const sasUrl = `https://${accountName}.blob.core.windows.net/${containerName}?${sasToken}`;
-    console.log(`\nContainerUrl = ${sasUrl}\n`);
-
-    // Create container client from SAS token url
-    const containerClient = new ContainerClient(sasUrl);
-
-    let i = 1;
-
-    // List blobs in container
-    for await (const blob of containerClient.listBlobsFlat()) {
-        console.log(`Blob ${i++}: ${blob.name}`);
-    }    
+    console.log(`Access link for "${filename}": `);
+    console.log(sasUrl);
+    console.log('\n↳ Valid for 10 minutes.');
+  } catch (err) {
+    console.error(`Error fetching SAS link: ${err.message}`);
+    process.exit(1);
+  }
 }
 
-listBlobs(sasToken)
-    .then(() => console.log("Blob listing completed."))
-    .catch(err => console.error("Error listing blobs:", err));
+// Read filename from command-line argument
+const filename = process.argv[2];
+getPdfSasLink(filename);

@@ -1,122 +1,93 @@
+// index.js
+const { DefaultAzureCredential } = require('@azure/identity');
 const {
-    DefaultAzureCredential
-} = require('@azure/identity');
-const {
-    ContainerClient,
-    BlobServiceClient,
-    ContainerSASPermissions,
-    generateBlobSASQueryParameters,
-    SASProtocol
+  BlobServiceClient,
+  BlobSASPermissions,
+  generateBlobSASQueryParameters,
+  SASProtocol
 } = require('@azure/storage-blob');
-
-// used for local environment variables
 require('dotenv').config();
 
-// Server creates User Delegation SAS Token for container
-async function createContainerSas() {
+async function createBlobSasForFilename(filename) {
+  // 1. Read env vars
+  const accountName   = process.env.AZURE_STORAGE_ACCOUNT_NAME;
+  const containerName = process.env.AZURE_STORAGE_BLOB_CONTAINER_NAME;
 
-    // Get environment variables
-    const accountName = process.env.AZURE_STORAGE_ACCOUNT_NAME;
-    const containerName = process.env.AZURE_STORAGE_BLOB_CONTAINER_NAME;
+  if (!accountName || !containerName) {
+    throw new Error("AZURE_STORAGE_ACCOUNT_NAME and AZURE_STORAGE_BLOB_CONTAINER_NAME must be set.");
+  }
+  if (!filename) {
+    throw new Error("Filename is required.");
+  }
 
-    // Best practice: create time limits
-    const TEN_MINUTES = 10 * 60 * 1000;
-    const NOW = new Date();
+  // 2. Compute time window (10 minutes before → 10 minutes after now)
+  const TEN_MINUTES = 10 * 60 * 1000;
+  const now = new Date();
+  const startsOn = new Date(now.valueOf() - TEN_MINUTES);
+  const expiresOn = new Date(now.valueOf() + TEN_MINUTES);
 
-    // Best practice: set start time a little before current time to 
-    // make sure any clock issues are avoided
-    const TEN_MINUTES_BEFORE_NOW = new Date(NOW.valueOf() - TEN_MINUTES);
-    const TEN_MINUTES_AFTER_NOW = new Date(NOW.valueOf() + TEN_MINUTES);
+  // 3. Create BlobServiceClient via Managed Identity
+  const blobServiceClient = new BlobServiceClient(
+    `https://${accountName}.blob.core.windows.net`,
+    new DefaultAzureCredential()
+  );
 
-    // Best practice: use managed identity - DefaultAzureCredential
-    const blobServiceClient = new BlobServiceClient(
-        `https://${accountName}.blob.core.windows.net`,
-        new DefaultAzureCredential()
-      );
+  // 4. Get a user delegation key for our time window
+  const userDelegationKey = await blobServiceClient.getUserDelegationKey(startsOn, expiresOn);
 
-    // Best practice: delegation key is time-limited  
-    // When using a user delegation key, container must already exist 
-    const userDelegationKey = await blobServiceClient.getUserDelegationKey(
-        TEN_MINUTES_BEFORE_NOW, 
-        TEN_MINUTES_AFTER_NOW
-    );
+  // 5. Build the blob‐scoped SAS options
+  const fullBlobName = filename;
 
-    // Need only list permission to list blobs 
-    const containerPermissionsForAnonymousUser = "rl";
+  const sasOptions = {
+    containerName,
+    blobName: fullBlobName,
+    permissions: BlobSASPermissions.parse("r"), // read‐only
+    protocol: SASProtocol.HttpsAndHttp,
+    startsOn,
+    expiresOn
+  };
 
-    // Best practice: SAS options are time-limited
-    const sasOptions = {
-        containerName,                                           
-        permissions: ContainerSASPermissions.parse(containerPermissionsForAnonymousUser), 
-        protocol: SASProtocol.HttpsAndHttp,
-        startsOn: TEN_MINUTES_BEFORE_NOW,
-        expiresOn: TEN_MINUTES_AFTER_NOW
-    };
- 
-    const sasToken = generateBlobSASQueryParameters(
-        sasOptions,
-        userDelegationKey,
-        accountName 
-    ).toString();
+  // 6. Generate the SAS query string
+  const sasToken = generateBlobSASQueryParameters(
+    sasOptions,
+    userDelegationKey,
+    accountName
+  ).toString();
 
-    return sasToken;
+  // 7. Return the full URL
+  const sasUrl = `https://${accountName}.blob.core.windows.net/${containerName}/${encodeURIComponent(fullBlobName)}?${sasToken}`;
+  return sasUrl;
 }
 
-// // Client or another process uses SAS token to use container
-// async function listBlobs(sasToken){
-
-//     // Get environment variables
-//     const accountName = process.env.AZURE_STORAGE_ACCOUNT_NAME;
-//     const containerName = process.env.AZURE_STORAGE_BLOB_CONTAINER_NAME;
-    
-//     // Create Url
-//     // SAS token is the query string with typical `?` delimiter
-//     const sasUrl = `https://${accountName}.blob.core.windows.net/${containerName}?${sasToken}`;
-//     console.log(`\nContainerUrl = ${sasUrl}\n`);
-
-//     // Create container client from SAS token url
-//     const containerClient = new ContainerClient(sasUrl);
-
-//     let i = 1;
-
-//     // List blobs in container
-//     for await (const blob of containerClient.listBlobsFlat()) {
-//         console.log(`Blob ${i++}: ${blob.name}`);
-//     }    
-// }
-
-// Create Express app
+// --------------------- EXPRESS SETUP ---------------------
 
 const express = require('express');
 const cors = require('cors');
-
 const app = express();
 const port = process.env.PORT || 80;
 
-// Enable CORS (adjust origins if you want to lock it down)
+// (Allow only CORS requests from the frontend for prod)
 app.use(cors());
 
-// Define a GET endpoint at "/api/containersas"
-app.get('/api/containersas', async (req, res) => {
+/**
+ * GET /api/blob-sas?filename=<theBlobName>
+ * 
+ * Returns JSON: { sasUrl: "<full_blob_sas_url>" }
+ */
+app.get('/api/blob-sas', async (req, res) => {
   try {
-    const sasToken = await createContainerSas();
-    // Return just the raw SAS token string:
-    return res.json({ sasToken });
+    const filename = req.query.filename;
+    if (!filename) {
+      return res.status(400).json({ error: "Query parameter 'filename' is required." });
+    }
+    const sasUrl = await createBlobSasForFilename(filename);
+    return res.json({ sasUrl });
   } catch (err) {
-    console.error('Error generating container SAS:', err);
+    console.error('Error generating blob SAS:', err);
     return res.status(500).json({ error: err.message });
   }
 });
 
-// Start the Express server
 app.listen(port, () => {
   console.log(`SAS‐backend listening on port ${port}`);
 });
-
-// sasToken = createContainerSas()
-
-// console.log(`SAS Token: ${sasToken}`);
-
-// listBlobs(sasToken)
-//     .then(() => console.log("Blob listing completed."))
-//     .catch(err => console.error("Error listing blobs:", err));
